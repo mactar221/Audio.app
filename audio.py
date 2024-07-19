@@ -1,118 +1,168 @@
-import os
-import shutil
-
+# import dependences
 import streamlit as st
-import whisper
-from pytube import YouTube
-
-TMP_PATH = "tmp"
-SUPPORTED_FILE_TYPES = ["mp3", "wav", "flac", "mp4", "m4a", "ogg", "aac", "avi", "mkv"]
-SUPPORTED_MODELS = ["tiny", "base"]  # "small", "medium", "large"
-
-os.makedirs(TMP_PATH, exist_ok=True)
-
-
-def download_youtube_audio(youtube_url):
-    yt = YouTube(youtube_url)
-    audio_stream = yt.streams.filter(only_audio=True).first()
-    audio_file = audio_stream.download(output_path=TMP_PATH)
-    return audio_file
+import librosa
+import csv
+import os
+import numpy as np
+import pandas as pd
+from PIL import Image
+from keras.models import load_model
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import LabelEncoder
 
 
-def transcribe_audio(audio_file_path, model_name="base"):
-    model = whisper.load_model(model_name)
-    result = model.transcribe(audio_file_path)
-    return result["text"]
+
+# save sound file, uploaded before, in a folder
+def save_file(sound_file):
+    
+    # save your sound file in the right folder by following the path 
+    with open(os.path.join('audio_files/', sound_file.name),'wb') as f:
+         f.write(sound_file.getbuffer())
+    
+    return sound_file.name
 
 
-def models_format_func(x):
-    mapping = {
-        "tiny": 32,
-        "base": 16,
-        "small": 6,
-        "medium": 2,
-        "large": 1,
-    }
-    return f"{x.upper()} (relative speed: ~{mapping[x]}x)"
+
+# transform the sound into a csv file
+def transform_wav_to_csv(sound_saved):
+    
+    # define the column names
+    header_test = 'filename length chroma_stft_mean chroma_stft_var rms_mean rms_var spectral_centroid_mean spectral_centroid_var spectral_bandwidth_mean \
+        spectral_bandwidth_var rolloff_mean rolloff_var zero_crossing_rate_mean zero_crossing_rate_var harmony_mean harmony_var perceptr_mean perceptr_var tempo mfcc1_mean mfcc1_var mfcc2_mean \
+        mfcc2_var mfcc3_mean mfcc3_var mfcc4_mean mfcc4_var'.split()
+    
+    # create the csv file
+    file = open(f'csv_files/{os.path.splitext(sound_saved)[0]}.csv', 'w', newline = '')
+    with file:
+        writer = csv.writer(file)
+        writer.writerow(header_test)
+        
+    # calculate the value of the librosa parameters
+    sound_name = f'audio_files/{sound_saved}'
+    y, sr = librosa.load(sound_name, mono = True, duration = 30)
+    chroma_stft = librosa.feature.chroma_stft(y = y, sr = sr)
+    rmse = librosa.feature.rms(y = y)
+    spec_cent = librosa.feature.spectral_centroid(y = y, sr = sr)
+    spec_bw = librosa.feature.spectral_bandwidth(y = y, sr = sr)
+    rolloff = librosa.feature.spectral_rolloff(y = y, sr = sr)
+    zcr = librosa.feature.zero_crossing_rate(y)
+    mfcc = librosa.feature.mfcc(y = y, sr = sr)
+    to_append = f'{os.path.basename(sound_name)} {np.mean(chroma_stft)} {np.mean(rmse)} {np.mean(spec_cent)} {np.mean(spec_bw)} {np.mean(rolloff)} {np.mean(zcr)}'
+    for e in mfcc:
+        to_append += f' {np.mean(e)}'
+    
+    # fill in the csv file
+    file = open(f'csv_files/{os.path.splitext(sound_saved)[0]}.csv', 'a', newline = '')
+    with file:
+        writer = csv.writer(file)
+        writer.writerow(to_append.split())
+    
+    # create test dataframe
+    df_test = pd.read_csv(f'csv_files/{os.path.splitext(sound_saved)[0]}.csv')
+    
+    # each time you add a sound, a line is added to the test.csv file
+    # if you want to display the whole dataframe, you can deselect the following line
+    #st.write(df_test)
+    
+    return df_test
 
 
-if "audio_file_path" not in st.session_state:
-    st.session_state.audio_file_path = ""
-if "last_processed_file" not in st.session_state:
-    st.session_state.last_processed_file = ""
-if "transcription" not in st.session_state:
-    st.session_state.transcription = ""
-if "transcribed" not in st.session_state:
-    st.session_state.transcribed = False
-if "downloaded" not in st.session_state:
-    st.session_state.downloaded = False
+
+# classify the uploded sounds
+def classification(dataframe):
+    
+    # create a dataframe with the csv file of the data used for training and validation
+    df = pd.read_csv('csv_files/data.csv')
+    
+    # OUTPUT: labels => last column
+    labels_list = df.iloc[:,-1]
+    
+    # encode the labels (0 => 44)
+    converter = LabelEncoder()
+    y = converter.fit_transform(labels_list)
+    
+    # INPUTS: all other columns are inputs except the filename
+    scaler = StandardScaler()
+    X = scaler.fit_transform(np.array(df.iloc[:, 1:27]))
+    X_test = scaler.transform(np.array(dataframe.iloc[:, 1:27]))
+
+    # load the pretrained model
+    model = load_model('saved_model/my_model2')
+    
+    # generate predictions for test samples
+    predictions = model.predict(X_test)
+    
+    # generate argmax for predictions
+    classes = np.argmax(predictions, axis = 1)
+    
+    # transform class number into class name
+    result = converter.inverse_transform(classes)
+
+    return result
 
 
-st.title("Audio Transcription with Whisper")
-input_container = st.empty()
-output_container = st.empty()
 
-try:
-    with input_container.container():
-        audio_source = st.radio("Select audio source", ("Upload File", "YouTube Link"))
-        if audio_source == "Upload File":
-            uploaded_file = st.file_uploader("Choose an audio file", type=SUPPORTED_FILE_TYPES)
-            if (
-                uploaded_file is not None
-                and uploaded_file.name != st.session_state.last_processed_file
-            ):
-                bytes_data = uploaded_file.getvalue()
-                st.session_state.audio_file_path = f"{TMP_PATH}/{uploaded_file.name}"
-                with open(st.session_state.audio_file_path, "wb") as f:
-                    f.write(bytes_data)
-                st.session_state.last_processed_file = uploaded_file.name
-                st.session_state.transcribed = False
+# if you have chosen prediction in the sidebar
+def choice_prediction():
+    st.write('# Prediction')
+    st.write('### Choose a marine mammal sound file in .wav format')
+    
+    # upload sound
+    uploaded_file = st.file_uploader(' ', type='wav')
+    
+    if uploaded_file is not None:
+            
+        # view details
+        file_details = {'filename':uploaded_file.name, 'filetype':uploaded_file.type, 'filesize':uploaded_file.size}
+        st.write(file_details)
+        
+        # read and play the audio file
+        st.write('### Play audio')
+        audio_bytes = uploaded_file.read()
+        st.audio(audio_bytes, format='audio/wav')
+      
+        # save_file function
+        save_file(uploaded_file)
 
-        elif audio_source == "YouTube Link":
-            youtube_url = st.text_input("Enter YouTube video link:")
-            if youtube_url and youtube_url != st.session_state.last_processed_file:
-                with st.spinner("Downloading YouTube video audio..."):
-                    st.session_state.audio_file_path = download_youtube_audio(youtube_url)
-                    st.session_state.last_processed_file = youtube_url
-                st.session_state.transcribed = False
+        # define the filename
+        sound = uploaded_file.name
+        
+        # transform_wav_to_csv function
+        transform_wav_to_csv(sound)
+        
+        st.write('### Classification results')
+        
+        # if you select the predict button
+        if st.button('Predict'):
+            # write the prediction: the prediction of the last sound sent corresponds to the first column
+            st.write("The marine mammal is: ",  str(classification(transform_wav_to_csv(sound))).replace('[', '').replace(']', '').replace("'", '').replace('"', ''))
 
-    with output_container.container():
-        if st.session_state.audio_file_path and not st.session_state.transcribed:
-            model_name = st.selectbox(
-                "Select Model", SUPPORTED_MODELS, index=1, format_func=models_format_func
-            )
-            if st.button("Transcribe"):
-                with st.spinner("Transcribing audio..."):
-                    st.session_state.transcription = transcribe_audio(
-                        st.session_state.audio_file_path, model_name=model_name
-                    )
-                    st.session_state.transcribed = True
-
-    with output_container.container():
-        if st.session_state.transcribed:
-            edited_transcription = st.text_area(
-                "Transcription", st.session_state.transcription, height=300
-            )
-            st.session_state.transcription = edited_transcription
-            st.session_state.downloaded = st.download_button(
-                label="Download Transcription as TXT",
-                data=st.session_state.transcription,
-                file_name="transcription.txt",
-                mime="text/plain",
-            )
-            # cleanup files after transcription
-            shutil.rmtree(TMP_PATH, ignore_errors=True)
-
-    if st.session_state.downloaded:
-        # reset app after download
-        for key in st.session_state.keys():
-            st.session_state.pop(key)
-        output_container.empty()
-        st.info("Transcription downloaded successfully!", icon="🎉")
-        st.balloons()
-
-
-except:
-    st.error("An error occurred. Please reload page.", icon="🚨")
-    shutil.rmtree(TMP_PATH, ignore_errors=True)
-    st.stop()
+    else:
+        st.write('The file has not been uploaded yet')
+    
+    return
+        
+        
+        
+# main
+if __name__ == '__main__':
+    
+    st.image(Image.open('logo_ovh.png'), width=200)
+    st.write('___')
+    
+    # create a sidebar
+    st.sidebar.title('Marine mammal sounds classification')
+    select = st.sidebar.selectbox('', ['Marine mammals', 'Prediction'], key='1')
+    st.sidebar.write(select)
+    
+    # if sidebar selection is "Prediction"
+    if select=='Prediction':
+        # choice_prediction function
+        choice_prediction()
+    
+    # else: stay on the home page
+    else:
+        st.write('# Marine mammals')
+        st.write('The different marine mammals studied are the following.')
+        st.write('For more information, please refer to this [link](https://cis.whoi.edu/science/B/whalesounds/index.cfm).')
+        st.image(Image.open('marine_mammal_animals.png'))
