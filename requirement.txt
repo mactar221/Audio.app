@@ -1,3 +1,8 @@
 streamlit
-pytube
-whisper
+tensorflow
+flask
+librosa
+numpy==1.22.4
+pandas
+scikit-learn
+keras
